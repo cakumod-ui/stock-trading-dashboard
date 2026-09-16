@@ -25,11 +25,17 @@ def fetch_stock_price(ticker, days):
     
     # Fetch historical data
     df_price = stock.history(start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'))
-    df_price.reset_index(inplace=True)
     
-    # Ensure Date is timezone naive for clean merging
     if not df_price.empty:
-        df_price['Date'] = pd.to_datetime(df_price['Date']).dt.tz_localize(None)
+        df_price.reset_index(inplace=True)
+        # Handle Yahoo Finance column variations
+        date_col = 'Date' if 'Date' in df_price.columns else 'Datetime'
+        
+        # Standardize strictly to timezone-naive datetime objects
+        df_price['Date'] = pd.to_datetime(df_price[date_col]).dt.tz_localize(None)
+        
+        # Sort values chronologically
+        df_price = df_price.sort_values('Date')
         
     return df_price
 
@@ -49,34 +55,35 @@ def fetch_google_news(ticker, days):
         
         # Parse XML items (Limit to top 50 to avoid cluttering the graph)
         for item in root.findall('.//item')[:50]:
-            title = item.find('title').text
-            link = item.find('link').text
-            pub_date = item.find('pubDate').text
+            title = item.find('title').text if item.find('title') is not None else "No Title"
+            link = item.find('link').text if item.find('link') is not None else "#"
+            pub_date = item.find('pubDate').text if item.find('pubDate') is not None else ""
             
-            # Convert Google's date format ('Thu, 07 Sep 2023 15:30:00 GMT')
-           df_news = pd.DataFrame(news_list)
-    
-            # Sort by date and STRIP TIMEZONES (critical for the smart-merge function later)
-            if not df_news.empty:
-                df_news['Date'] = pd.to_datetime(df_news['Date']).dt.tz_localize(None) # <--- ADD THIS LINE
-                df_news = df_news.sort_values('Date')
-        
-            return df_news
+            if pub_date:
+                try:
+                    # Parse Google's GMT date format
+                    dt = datetime.strptime(pub_date, '%a, %d %b %Y %H:%M:%S %Z')
+                except ValueError:
+                    # Fallback parser
+                    dt = pd.to_datetime(pub_date)
+            else:
+                continue
             
             news_list.append({
-                'Date': dt, # Keep as datetime object for smart merging
-                'Headline': title.split('-')[0].strip(), # Clean up source from title
+                'Date': dt,
+                'Headline': title.split('-')[0].strip(),
                 'Publisher': title.split('-')[-1].strip() if '-' in title else 'Google News',
                 'Link': link
             })
             
-    except Exception as e:
-        st.error("Failed to fetch news feed.")
+    except Exception:
+        pass # Fails silently and continues to return empty dataframe
         
     df_news = pd.DataFrame(news_list)
     
-    # Sort by date (critical for the smart-merge function later)
     if not df_news.empty:
+        # STRIP TIMEZONES for clean merge with Yahoo Finance prices
+        df_news['Date'] = pd.to_datetime(df_news['Date']).dt.tz_localize(None)
         df_news = df_news.sort_values('Date')
         
     return df_news
@@ -101,10 +108,6 @@ if ticker_input:
 
         # --- The Smart Merge: Snapping News to Trading Days ---
         if not df_news.empty:
-            # Sort price data by date (required for merge_asof)
-            df_price = df_price.sort_values('Date')
-            
-            # merge_asof finds the *nearest* stock price date for every news date
             merged_df = pd.merge_asof(
                 df_news, 
                 df_price[['Date', 'Close']], 
