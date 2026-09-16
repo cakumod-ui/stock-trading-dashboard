@@ -54,7 +54,14 @@ def fetch_google_news(ticker, days):
             pub_date = item.find('pubDate').text
             
             # Convert Google's date format ('Thu, 07 Sep 2023 15:30:00 GMT')
-            dt = datetime.strptime(pub_date, '%a, %d %b %Y %H:%M:%S %Z')
+           df_news = pd.DataFrame(news_list)
+    
+    # Sort by date and STRIP TIMEZONES (critical for the smart-merge function later)
+    if not df_news.empty:
+        df_news['Date'] = pd.to_datetime(df_news['Date']).dt.tz_localize(None) # <--- ADD THIS LINE
+        df_news = df_news.sort_values('Date')
+        
+    return df_news
             
             news_list.append({
                 'Date': dt, # Keep as datetime object for smart merging
