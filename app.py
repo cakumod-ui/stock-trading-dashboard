@@ -31,8 +31,8 @@ def fetch_stock_price(ticker, days):
         # Handle Yahoo Finance column variations
         date_col = 'Date' if 'Date' in df_price.columns else 'Datetime'
         
-        # Standardize strictly to timezone-naive datetime objects
-        df_price['Date'] = pd.to_datetime(df_price[date_col]).dt.tz_localize(None)
+        # Standardize strictly to timezone-naive datetime objects with nanosecond resolution
+        df_price['Date'] = pd.to_datetime(df_price[date_col]).dt.tz_localize(None).astype('datetime64[ns]')
         
         # Sort values chronologically
         df_price = df_price.sort_values('Date')
@@ -82,8 +82,8 @@ def fetch_google_news(ticker, days):
     df_news = pd.DataFrame(news_list)
     
     if not df_news.empty:
-        # STRIP TIMEZONES for clean merge with Yahoo Finance prices
-        df_news['Date'] = pd.to_datetime(df_news['Date']).dt.tz_localize(None)
+        # STRIP TIMEZONES and enforce nanosecond resolution for clean merge with Yahoo Finance prices
+        df_news['Date'] = pd.to_datetime(df_news['Date']).dt.tz_localize(None).astype('datetime64[ns]')
         df_news = df_news.sort_values('Date')
         
     return df_news
@@ -108,6 +108,7 @@ if ticker_input:
 
         # --- The Smart Merge: Snapping News to Trading Days ---
         if not df_news.empty:
+            
             merged_df = pd.merge_asof(
                 df_news, 
                 df_price[['Date', 'Close']], 
