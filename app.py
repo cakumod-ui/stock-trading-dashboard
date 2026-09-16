@@ -10,16 +10,48 @@ import os
 # --- Page Configuration ---
 st.set_page_config(page_title="Quant Event-Driven Dashboard", layout="wide")
 st.title("📈 Quantitative Event-Driven Trading Dashboard")
-st.markdown("Interactive stock chart with algorithmic news event markers. Powered by a live deduplication engine.")
+st.markdown("Interactive stock chart with algorithmic news event markers. Select a NASDAQ stock from the dropdown below.")
+
+# --- Curated Master List of NASDAQ Listed Stocks for Dropdown ---
+nasdaq_stocks = {
+    "NVDA": "Nvidia Corporation (NVDA)",
+    "MU": "Micron Technology, Inc. (MU)",
+    "AAPL": "Apple Inc. (AAPL)",
+    "MSFT": "Microsoft Corporation (MSFT)",
+    "GOOGL": "Alphabet Inc. / Google (GOOGL)",
+    "AMZN": "Amazon.com, Inc. (AMZN)",
+    "META": "Meta Platforms, Inc. (META)",
+    "TSLA": "Tesla, Inc. (TSLA)",
+    "NFLX": "Netflix, Inc. (NFLX)",
+    "AMD": "Advanced Micro Devices, Inc. (AMD)",
+    "INTC": "Intel Corporation (INTC)",
+    "QCOM": "QUALCOMM Incorporated (QCOM)",
+    "CSCO": "Cisco Systems, Inc. (CSCO)",
+    "PEP": "PepsiCo, Inc. (PEP)",
+    "COST": "Costco Wholesale Corporation (COST)",
+    "AVGO": "Broadcom Inc. (AVGO)",
+    "ADBE": "Adobe Inc. (ADBE)",
+    "TXN": "Texas Instruments Incorporated (TXN)"
+}
 
 # --- Sidebar Controls ---
 st.sidebar.header("Dashboard Controls")
-ticker_input = st.sidebar.text_input("Enter US Stock Ticker (e.g., NVDA, MU, AAPL)", "NVDA").upper()
+
+# Dropdown selector instead of text input
+selected_display_name = st.sidebar.selectbox(
+    "Select NASDAQ Stock", 
+    options=list(nasdaq_stocks.values()),
+    index=0 # Defaults to Nvidia
+)
+
+# Extract ticker symbol from the selection (e.g., "Nvidia Corporation (NVDA)" -> "NVDA")
+ticker_input = [k for k, v in nasdaq_stocks.items() if v == selected_display_name][0]
+
 days_to_fetch = st.sidebar.slider("Historical Data Range (Days)", 30, 365, 180)
 
 # --- Built-In LIVE Data Engine ---
 def build_clean_database(ticker, days):
-    """Fetches real live news via Google RSS, deduplicates it, and builds a clean database."""
+    """Fetches real live news via Google RSS for the selected ticker, deduplicates it, and saves."""
     url = f'https://news.google.com/rss/search?q={ticker}+stock+when:{days}d&hl=en-US&gl=US&ceid=US:en'
     req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
     
@@ -54,36 +86,27 @@ def build_clean_database(ticker, days):
         st.error(f"Failed to fetch live data: {e}")
         return
 
-    # Create DataFrame from live data
     if not news_list:
-        st.warning("No live news found for this timeframe.")
         return
         
     combined_df = pd.DataFrame(news_list)
     
-    # ----------------------------------------
-    # THE DEDUPLICATION PIPELINE (Level 1 & 2)
-    # ----------------------------------------
-    # 1. Drop exact matches
+    # --- DEDUPLICATION ENGINE ---
     clean_df = combined_df.drop_duplicates(subset=['URL'], keep='first')
     clean_df = clean_df.drop_duplicates(subset=['Headline'], keep='first')
     
-    # 2. Event-based algorithmic deduplication (Only 1 headline per stock per day!)
     clean_df['Date_Temp'] = pd.to_datetime(clean_df['Date'])
     clean_df['Date_Only'] = clean_df['Date_Temp'].dt.date
     final_df = clean_df.drop_duplicates(subset=['Ticker', 'Date_Only'], keep='first')
     
-    # Clean up columns and sort
     final_df = final_df.drop(columns=['Date_Temp', 'Date_Only']).sort_values(by=['Date'])
-    
-    # Save the massive clean database!
     final_df.to_csv(f"Clean_Algo_News_{ticker}.csv", index=False)
 
 
 # --- Sidebar Button ---
 st.sidebar.divider()
 st.sidebar.subheader("⚙️ Live Data Engine")
-st.sidebar.markdown(f"Click below to fetch and deduplicate up to 100 live articles for **{ticker_input}**.")
+st.sidebar.markdown(f"Click below to fetch and deduplicate live articles for **{ticker_input}**.")
 
 if st.sidebar.button(f"Fetch & Build {ticker_input} Database"):
     with st.spinner(f"Scraping the web and running deduplication for {ticker_input}..."):
@@ -112,27 +135,23 @@ def fetch_stock_price(ticker, days):
 # --- 2. Fetch Saved News Data ---
 @st.cache_data(ttl=5)
 def fetch_saved_news(ticker):
-    # Dynamically look for the CSV of the specific ticker
     file_path = f"Clean_Algo_News_{ticker}.csv"
     
     if os.path.exists(file_path):
         try:
             df_news = pd.read_csv(file_path)
-            
             if not df_news.empty:
                 df_news['Date'] = pd.to_datetime(df_news['Date']).dt.tz_localize(None).astype('datetime64[ns]')
                 df_news = df_news.sort_values('Date')
-                
             return df_news
-            
-        except Exception as e:
+        except Exception:
             return pd.DataFrame()
     else:
         return pd.DataFrame()
 
 # --- Application Logic ---
 if ticker_input:
-    with st.spinner(f"Rendering dashboard for {ticker_input}..."):
+    with st.spinner(f"Rendering dashboard for {selected_display_name}..."):
         df_price = fetch_stock_price(ticker_input, days_to_fetch)
         df_news = fetch_saved_news(ticker_input)
 
@@ -148,7 +167,7 @@ if ticker_input:
             line=dict(color='#00ff9d', width=2)
         ))
 
-        # Add News Markers
+        # Add News Markers with Smart Merge
         if not df_news.empty:
             merged_df = pd.merge_asof(
                 df_news, 
@@ -169,7 +188,7 @@ if ticker_input:
 
         # Layout Formatting
         fig.update_layout(
-            title=f"{ticker_input} Price Action & Event Triggers",
+            title=f"{selected_display_name} Price Action & Event Triggers",
             xaxis_title="Date",
             yaxis_title="Close Price (USD)",
             hovermode="closest",
@@ -188,7 +207,7 @@ if ticker_input:
             st.subheader(f"🗞️ Master Database Timeline")
             
             if df_news.empty:
-                st.warning(f"⚠️ No database found for {ticker_input}. Click 'Fetch & Build' in the sidebar!")
+                st.warning(f"⚠️ No database found for {ticker_input}. Click **'Fetch & Build'** in the sidebar!")
             else:
                 st.success(f"Loaded {len(df_news)} deduplicated events.")
                 df_news_display = df_news.sort_values('Date', ascending=False)
@@ -198,4 +217,4 @@ if ticker_input:
                     st.markdown(f"[{row['Headline']}]({row['URL']})")
                     st.divider()
     else:
-        st.error("Failed to fetch price data. Check the ticker symbol.")
+        st.error("Failed to fetch price data. Check the stock ticker.")
