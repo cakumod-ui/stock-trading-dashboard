@@ -15,25 +15,41 @@ days_to_fetch = st.sidebar.slider("Historical Data Range (Days)", 30, 365, 180)
 @st.cache_data(ttl=3600)
 def fetch_stock_and_news(ticker, days):
     stock = yf.Ticker(ticker)
+    
     # 1. Fetch Price Data
     end_date = datetime.today()
     start_date = end_date - timedelta(days=days)
     df_price = stock.history(start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'))
     df_price.reset_index(inplace=True)
-    # 2. Fetch News Data (yfinance free tier returns recent news)
+    
+    # 2. Fetch News Data safely
     news_data = stock.news
     news_list = []
+    
     for article in news_data:
-        pub_date = datetime.fromtimestamp(article['providerPublishTime'])
-        news_list.append({
-            'Date': pub_date.strftime('%Y-%m-%d'),
-            'Headline': article['title'],
-            'Link': article['link'],
-            'Publisher': article['publisher']
-        })
+        # Safely try to find the timestamp, fallback to 'pubDate' if 'providerPublishTime' is missing
+        timestamp = article.get('providerPublishTime') or article.get('pubDate')
+        
+        # Only process the article if a valid timestamp exists
+        if timestamp:
+            try:
+                # Convert unix timestamp to readable date
+                pub_date = datetime.fromtimestamp(timestamp)
+                
+                news_list.append({
+                    'Date': pub_date.strftime('%Y-%m-%d'),
+                    'Headline': article.get('title', 'Headline Unavailable'),
+                    'Link': article.get('link', '#'),
+                    'Publisher': article.get('publisher', 'Unknown Publisher')
+                })
+            except Exception:
+                # If there's any issue parsing a specific date, skip it and continue
+                continue
+        
     df_news = pd.DataFrame(news_list)
+    
     return df_price, df_news
-
+    
 if ticker_input:
     with st.spinner(f"Fetching market data and news for {ticker_input}..."):
         df_price, df_news = fetch_stock_and_news(ticker_input, days_to_fetch)
