@@ -1,25 +1,34 @@
-import subprocess
 import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
 import pandas as pd
 from datetime import datetime, timedelta
-import urllib.request
-import xml.etree.ElementTree as ET
+import subprocess
+import os
 
 # --- Page Configuration ---
 st.set_page_config(page_title="Quant Event-Driven Dashboard", layout="wide")
 st.title("📈 Quantitative Event-Driven Trading Dashboard")
-st.markdown("Interactive stock chart with news event markers. Weekend news automatically snaps to the nearest trading day.")
+st.markdown("Interactive stock chart with algorithmic news event markers. News data powered by custom deduplication engine.")
 
 # --- Sidebar Controls ---
+st.sidebar.header("Dashboard Controls")
+ticker_input = st.sidebar.text_input("Enter US Stock Ticker (e.g., NVDA, MU, AAPL)", "NVDA").upper()
+days_to_fetch = st.sidebar.slider("Historical Data Range (Days)", 30, 365, 180)
+
+# --- Data Engine Control ---
 st.sidebar.divider()
 st.sidebar.subheader("⚙️ Data Engine")
+st.sidebar.markdown("Click below to run the deduplication pipeline and build a clean news database.")
+
 if st.sidebar.button("Build Clean Database"):
     with st.spinner("Running Deduplication Engine..."):
         # This tells the cloud server to run your engine file!
         subprocess.run(["python", "build_database.py"])
-        st.sidebar.success("Clean_Algo_News_Database.csv created!")
+        st.sidebar.success("✅ Clean_Algo_News_Database.csv created successfully!")
+        
+        # Clear Streamlit's cache so it reloads the new data instantly
+        st.cache_data.clear()
 
 # --- 1. Fetch Price Data ---
 @st.cache_data(ttl=3600)
@@ -44,59 +53,39 @@ def fetch_stock_price(ticker, days):
         
     return df_price
 
-# --- 2. Fetch News Data (Google RSS Engine) ---
-@st.cache_data(ttl=5) # Refreshes quickly so you see new data
-def fetch_saved_news():
-    try:
-        # Read the CSV your engine just built on the cloud server
-        df_news = pd.read_csv("Clean_Algo_News_Database.csv")
-        # Standardize dates so the chart doesn't crash
-        df_news['Date'] = pd.to_datetime(df_news['Date']).dt.tz_localize(None).astype('datetime64[ns]')
-        return df_news
-    except FileNotFoundError:
+# --- 2. Fetch Custom Built News Data ---
+@st.cache_data(ttl=5) # Fast refresh to see new data
+def fetch_saved_news(ticker):
+    file_path = "Clean_Algo_News_Database.csv"
+    
+    # Check if the file actually exists
+    if os.path.exists(file_path):
+        try:
+            # Read the CSV your engine just built
+            df_news = pd.read_csv(file_path)
+            
+            # Filter news specifically for the chosen ticker (so AAPL news doesn't show on NVDA chart)
+            df_news = df_news[df_news['Ticker'] == ticker].copy()
+            
+            if not df_news.empty:
+                # STRIP TIMEZONES and enforce nanosecond resolution for clean merge with Yahoo Finance prices
+                df_news['Date'] = pd.to_datetime(df_news['Date']).dt.tz_localize(None).astype('datetime64[ns]')
+                df_news = df_news.sort_values('Date')
+                
+            return df_news
+            
+        except Exception as e:
+            st.error(f"Error reading database: {e}")
+            return pd.DataFrame()
+    else:
         # Returns an empty dataframe if you haven't clicked the build button yet
         return pd.DataFrame()
-        
-        # Parse XML items (Limit to top 50 to avoid cluttering the graph)
-        for item in root.findall('.//item')[:50]:
-            title = item.find('title').text if item.find('title') is not None else "No Title"
-            link = item.find('link').text if item.find('link') is not None else "#"
-            pub_date = item.find('pubDate').text if item.find('pubDate') is not None else ""
-            
-            if pub_date:
-                try:
-                    # Parse Google's GMT date format
-                    dt = datetime.strptime(pub_date, '%a, %d %b %Y %H:%M:%S %Z')
-                except ValueError:
-                    # Fallback parser
-                    dt = pd.to_datetime(pub_date)
-            else:
-                continue
-            
-            news_list.append({
-                'Date': dt,
-                'Headline': title.split('-')[0].strip(),
-                'Publisher': title.split('-')[-1].strip() if '-' in title else 'Google News',
-                'Link': link
-            })
-            
-    except Exception:
-        pass # Fails silently and continues to return empty dataframe
-        
-    df_news = pd.DataFrame(news_list)
-    
-    if not df_news.empty:
-        # STRIP TIMEZONES and enforce nanosecond resolution for clean merge with Yahoo Finance prices
-        df_news['Date'] = pd.to_datetime(df_news['Date']).dt.tz_localize(None).astype('datetime64[ns]')
-        df_news = df_news.sort_values('Date')
-        
-    return df_news
 
 # --- Application Logic ---
 if ticker_input:
-    with st.spinner(f"Fetching market data and scanning news for {ticker_input}..."):
+    with st.spinner(f"Fetching market data and scanning database for {ticker_input}..."):
         df_price = fetch_stock_price(ticker_input, days_to_fetch)
-        df_news = fetch_saved_news()
+        df_news = fetch_saved_news(ticker_input)
 
     if not df_price.empty:
         fig = go.Figure()
@@ -126,9 +115,9 @@ if ticker_input:
                 y=merged_df['Close'],
                 mode='markers',
                 name='News Events',
-                marker=dict(color='#ff003c', size=10, symbol='circle', line=dict(color='white', width=1.5)),
+                marker=dict(color='#ff003c', size=12, symbol='star', line=dict(color='white', width=1.5)),
                 hoverinfo='text',
-                text=merged_df['Date'].dt.strftime('%Y-%m-%d') + "<br>" + merged_df['Publisher'] + ": " + merged_df['Headline']
+                text=merged_df['Date'].dt.strftime('%Y-%m-%d') + "<br>" + merged_df['Source'] + ": " + merged_df['Headline']
             ))
 
         # Chart Layout Formatting
@@ -149,16 +138,17 @@ if ticker_input:
             st.plotly_chart(fig, use_container_width=True)
             
         with col2:
-            st.subheader(f"🗞️ News Timeline ({days_to_fetch} Days)")
-            if not df_news.empty:
+            st.subheader(f"🗞️ Master Database Timeline")
+            
+            if df_news.empty:
+                st.warning("⚠️ No news data found in database. Click 'Build Clean Database' in the sidebar!")
+            else:
                 # Display newest first in the side column
                 df_news_display = df_news.sort_values('Date', ascending=False)
                 for idx, row in df_news_display.iterrows():
                     date_str = row['Date'].strftime('%b %d, %Y')
-                    st.markdown(f"**{date_str}** — *{row['Publisher']}*")
-                    st.markdown(f"[{row['Headline']}]({row['Link']})")
+                    st.markdown(f"**{date_str}** — *{row['Source']}*")
+                    st.markdown(f"[{row['Headline']}]({row['URL']})")
                     st.divider()
-            else:
-                st.write("No news data found for this timeframe.")
     else:
         st.error("Failed to fetch price data. Check the ticker symbol.")
