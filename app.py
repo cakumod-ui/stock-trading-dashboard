@@ -1,3 +1,4 @@
+import subprocess
 import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
@@ -12,9 +13,13 @@ st.title("📈 Quantitative Event-Driven Trading Dashboard")
 st.markdown("Interactive stock chart with news event markers. Weekend news automatically snaps to the nearest trading day.")
 
 # --- Sidebar Controls ---
-st.sidebar.header("Dashboard Controls")
-ticker_input = st.sidebar.text_input("Enter US Stock Ticker (e.g., NVDA, MU, AAPL)", "NVDA").upper()
-days_to_fetch = st.sidebar.slider("Historical Data Range (Days)", 30, 365, 180)
+st.sidebar.divider()
+st.sidebar.subheader("⚙️ Data Engine")
+if st.sidebar.button("Build Clean Database"):
+    with st.spinner("Running Deduplication Engine..."):
+        # This tells the cloud server to run your engine file!
+        subprocess.run(["python", "build_database.py"])
+        st.sidebar.success("Clean_Algo_News_Database.csv created!")
 
 # --- 1. Fetch Price Data ---
 @st.cache_data(ttl=3600)
@@ -40,18 +45,17 @@ def fetch_stock_price(ticker, days):
     return df_price
 
 # --- 2. Fetch News Data (Google RSS Engine) ---
-@st.cache_data(ttl=3600)
-def fetch_google_news(ticker, days):
-    # Google RSS supports "when:180d" to search a specific timeframe
-    url = f'https://news.google.com/rss/search?q={ticker}+stock+when:{days}d&hl=en-US&gl=US&ceid=US:en'
-    
-    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-    news_list = []
-    
+@st.cache_data(ttl=5) # Refreshes quickly so you see new data
+def fetch_saved_news():
     try:
-        response = urllib.request.urlopen(req)
-        xml_data = response.read()
-        root = ET.fromstring(xml_data)
+        # Read the CSV your engine just built on the cloud server
+        df_news = pd.read_csv("Clean_Algo_News_Database.csv")
+        # Standardize dates so the chart doesn't crash
+        df_news['Date'] = pd.to_datetime(df_news['Date']).dt.tz_localize(None).astype('datetime64[ns]')
+        return df_news
+    except FileNotFoundError:
+        # Returns an empty dataframe if you haven't clicked the build button yet
+        return pd.DataFrame()
         
         # Parse XML items (Limit to top 50 to avoid cluttering the graph)
         for item in root.findall('.//item')[:50]:
@@ -92,7 +96,7 @@ def fetch_google_news(ticker, days):
 if ticker_input:
     with st.spinner(f"Fetching market data and scanning news for {ticker_input}..."):
         df_price = fetch_stock_price(ticker_input, days_to_fetch)
-        df_news = fetch_google_news(ticker_input, days_to_fetch)
+        df_news = fetch_saved_news()
 
     if not df_price.empty:
         fig = go.Figure()
