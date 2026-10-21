@@ -1,0 +1,40 @@
+name: ICICI Breeze Paper Trading Bot
+
+on:
+  # Allows manual triggering with a prompt for the daily apisession token
+  workflow_dispatch:
+    inputs:
+      apisession_token:
+        description: 'Daily ICICI Breeze Session Token'
+        required: true
+        type: string
+
+  # Scheduled run at 03:45 UTC (9:15 AM IST - Indian Market Open, Mon-Fri)
+  # Note: Requires active session token set in secrets or updated daily
+  schedule:
+    - cron: '45 3 * * 1-5'
+
+jobs:
+  run-trading-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Execute Paper Trading Script
+        env:
+          ICICI_API_KEY: ${{ secrets.ICICI_API_KEY }}
+          ICICI_API_SECRET: ${{ secrets.ICICI_API_SECRET }}
+          ICICI_SESSION_TOKEN: ${{ github.event.inputs.apisession_token || secrets.ICICI_SESSION_TOKEN }}
+        run: python bot.py
