@@ -5,6 +5,7 @@ import xml.etree.ElementTree as ET
 import requests
 
 from .config import DEFAULT_FUTURE_UNIVERSE, DEFAULT_NSE_UNIVERSE, NEWS_KEYWORDS
+from .config import get_cash_universe, get_fo_universe
 
 
 def safe_float(value, default=0.0):
@@ -138,16 +139,16 @@ def sentiment_score_from_news(headlines: List[str]) -> float:
 
 
 def scan_market(breeze=None, stock_symbols=None, future_symbols=None):
-    cash_symbols = list(stock_symbols or DEFAULT_NSE_UNIVERSE)
-    future_symbols = list(future_symbols or DEFAULT_FUTURE_UNIVERSE)
+    cash_symbols = list(stock_symbols or get_cash_universe())
+    future_symbols = list(future_symbols or get_fo_universe())
 
     quotes = fetch_quotes_from_breeze(breeze, cash_symbols, exchange_code="NSE", product_type="cash") if breeze else {}
     if not quotes:
-        quotes = {symbol: synthetic_quote(symbol) for symbol in cash_symbols[:60]}
+        quotes = {symbol: synthetic_quote(symbol) for symbol in cash_symbols[:300]}
 
     futures = fetch_quotes_from_breeze(breeze, future_symbols, exchange_code="NSE", product_type="cash") if breeze else {}
     if not futures:
-        futures = {symbol: synthetic_quote(symbol) for symbol in future_symbols[:20]}
+        futures = {symbol: synthetic_quote(symbol) for symbol in future_symbols[:100]}
 
     news = {}
     for symbol in cash_symbols:
@@ -157,4 +158,8 @@ def scan_market(breeze=None, stock_symbols=None, future_symbols=None):
             "sentiment_score": sentiment_score_from_news(headlines),
         }
 
-    return {"quotes": quotes, "futures": futures, "news": news}
+    return {
+        "quotes": quotes,
+        "futures": futures,
+        "news": news,
+    }
