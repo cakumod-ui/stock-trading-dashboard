@@ -1,11 +1,126 @@
+import json
 import os
 import sys
 import time
-import math
 import urllib.parse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
 import pandas as pd
 from breeze_connect import BreezeConnect
+
+
+STATE_PATH = Path(__file__).resolve().parent / ".trading_state.json"
+
+DEFAULT_NSE_UNIVERSE = [
+    "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN", "ITC",
+    "LTIM", "HCLTECH", "WIPRO", "TATAMOTORS", "AXISBANK", "KOTAKBANK",
+    "BAJFINANCE", "SUNPHARMA", "NTPC", "POWERGRID", "ULTRACEMCO",
+    "ASIANPAINT", "M&M", "JSWSTEEL", "TATASTEEL", "BHARTIARTL",
+    "TECHM", "MARUTI", "INDUSINDBK", "NESTLEIND", "ONGC", "HEROMOTOCO",
+    "GRASIM", "CIPLA", "DRREDDY", "IOC", "TITAN", "HINDUNILVR",
+    "BRITANNIA", "APOLLOHOSP", "EICHERMOT", "LT", "SHREECEM", "DIVISLAB",
+    "BAJAJ-AUTO", "BAJAJFINANCE", "HINDALCO", "ICICIPRULI", "UPL",
+    "TATACONSUM", "COALINDIA", "BEL", "GAIL", "VEDL", "BPCL", "CANBK",
+    "IDFCFIRSTB", "SIEMENS", "ADANIGREEN", "ADANIPORTS", "INDIGO", "ZOMATO",
+    "TRENT", "PAYTM", "SBI", "PNB", "YESBANK", "BANKBARODA", "AUBANK"
+]
+
+
+def load_selection_state():
+    if not STATE_PATH.exists():
+        return {"last_selected": {}}
+
+    try:
+        with STATE_PATH.open("r", encoding="utf-8") as handle:
+            state = json.load(handle)
+        return {"last_selected": state.get("last_selected", {})}
+    except Exception:
+        return {"last_selected": {}}
+
+
+def save_selection_state(state):
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with STATE_PATH.open("w", encoding="utf-8") as handle:
+        json.dump(state, handle, indent=2)
+
+
+def is_cooldown(stock_code, state, cooldown_hours=72):
+    last_selected = state.get("last_selected", {}).get(stock_code)
+    if not last_selected:
+        return False
+
+    try:
+        last_dt = datetime.fromisoformat(last_selected)
+    except ValueError:
+        return False
+
+    now = datetime.now(timezone.utc)
+    return now - last_dt < timedelta(hours=cooldown_hours)
+
+
+def mark_stock_selected(stock_code, state):
+    state.setdefault("last_selected", {})
+    state["last_selected"][stock_code] = datetime.now(timezone.utc).isoformat()
+
+
+def normalize_quote_snapshot(raw_quote):
+    if not raw_quote:
+        return {}
+
+    success = raw_quote.get("Success") or raw_quote.get("success") or []
+    if not success:
+        return {}
+
+    item = success[0] if isinstance(success, list) else success
+    if not isinstance(item, dict):
+        return {}
+
+    price = item.get("ltp")
+    if price is None:
+        return {}
+
+    volume = item.get("trdvol")
+    if volume is None:
+        volume = item.get("volume")
+    if volume is None:
+        volume = item.get("traded_volume")
+
+    change = item.get("day_change")
+    if change is None:
+        change = item.get("change")
+
+    change_pct = item.get("day_change_pct")
+    if change_pct is None:
+        change_pct = item.get("percent_change")
+    if change_pct is None and change is not None and price:
+        try:
+            change_pct = (float(change) / float(price)) * 100.0
+        except Exception:
+            change_pct = 0.0
+
+    return {
+        "ltp": float(price),
+        "day_change": float(change or 0.0),
+        "day_change_pct": float(change_pct or 0.0),
+        "volume": float(volume or 0.0),
+        "day_high": float(item.get("day_high") or 0.0),
+        "day_low": float(item.get("day_low") or 0.0),
+        "close": float(item.get("prev_close") or item.get("close") or price),
+    }
+
+
+def build_event_stream(stock_code, quote_snapshot):
+    change_pct = float(quote_snapshot.get("day_change_pct", 0.0) or 0.0)
+    if change_pct >= 0:
+        return [
+            {"headline": f"{stock_code} extends gains on broad market participation and strong demand", "category": "earnings"},
+            {"headline": f"{stock_code} shows positive momentum with buyers absorbing supply across the session", "category": "product_launch"},
+        ]
+    return [
+        {"headline": f"{stock_code} faces profit booking pressure and weak momentum in the current session", "category": "regulatory"},
+        {"headline": f"{stock_code} remains under pressure amid elevated volatility and weak sentiment", "category": "macroeconomic"},
+    ]
 
 
 # =====================================================================
@@ -16,7 +131,7 @@ class PaperTradingRiskManager:
     Tracks paper trading portfolio state, order history, and enforces
     risk parameters (Max Daily Loss, Stop-Loss, Take-Profit).
     """
-    def __init__(self, initial_capital=100000.0, max_daily_loss=2000.0, 
+    def __init__(self, initial_capital=100000.0, max_daily_loss=2000.0,
                  default_stop_loss_pct=0.01, default_take_profit_pct=0.02):
         self.capital = initial_capital
         self.portfolio_value = initial_capital
@@ -86,11 +201,9 @@ class PaperTradingRiskManager:
             return
 
         pos = self.positions[stock_code]
-        # Check Stop-Loss
         if current_price <= pos['sl']:
             print(f"🛑 Stop Loss Triggered for {stock_code} @ ₹{current_price:.2f}!")
             self.execute_paper_order(stock_code, pos['qty'], current_price, "SELL")
-        # Check Take-Profit
         elif current_price >= pos['tp']:
             print(f"🎯 Take Profit Triggered for {stock_code} @ ₹{current_price:.2f}!")
             self.execute_paper_order(stock_code, pos['qty'], current_price, "SELL")
@@ -105,21 +218,63 @@ class PaperTradingRiskManager:
 # 2. MULTI-AGENT ARCHITECTURE
 # =====================================================================
 class ResearchAgent:
-    def __init__(self, candidate_pool):
-        self.candidate_pool = candidate_pool
+    def __init__(self, candidate_pool=None):
+        self.candidate_pool = candidate_pool or DEFAULT_NSE_UNIVERSE
 
-    def recommend_candidates(self):
-        print("🔍 [Research Agent]: Scanning candidate pool for liquid equity instruments...")
-        return self.candidate_pool
+    def recommend_candidates(self, quote_map, active_positions=None, state=None, cooldown_hours=72):
+        print("🔍 [Research Agent]: Scanning NSE universe for the best momentum names...")
+        active_positions = active_positions or set()
+        candidates = []
+
+        for stock in self.candidate_pool:
+            if stock in active_positions:
+                continue
+            if state and is_cooldown(stock, state, cooldown_hours):
+                continue
+
+            quote = quote_map.get(stock, {})
+            if not quote:
+                continue
+
+            ltp = float(quote.get('ltp', 0.0) or 0.0)
+            change_pct = float(quote.get('day_change_pct', 0.0) or 0.0)
+            volume = float(quote.get('volume', 0.0) or 0.0)
+            score = (change_pct * 4.0) + min(volume / 1000000.0, 10.0)
+            if ltp > 0:
+                score += 1.0
+            if change_pct > 0:
+                score += 2.0
+
+            candidates.append((stock, score, quote))
+
+        if not candidates:
+            print("⚠️ No valid candidates after filtering inactive or cooled-down stocks.")
+            return []
+
+        candidates.sort(key=lambda item: item[1], reverse=True)
+        top = [stock for stock, _, _ in candidates[:10]]
+        print(f"✅ Ranked candidate list: {top}")
+        return top
 
 
 class TechnicalAgent:
     def __init__(self, breeze):
         self.breeze = breeze
 
-    def analyze(self, stock_code):
-        print(f"📊 [Technical Agent]: Evaluating price action & moving averages for {stock_code}...")
-        return {"signal": "BULLISH", "support": 1210.0, "resistance": 1245.0}
+    def analyze(self, stock_code, quote_snapshot=None):
+        quote_snapshot = quote_snapshot or {}
+        ltp = float(quote_snapshot.get('ltp', 0.0) or 0.0)
+        change_pct = float(quote_snapshot.get('day_change_pct', 0.0) or 0.0)
+
+        if change_pct >= 0:
+            signal = "BULLISH"
+        else:
+            signal = "BEARISH"
+
+        support = max(ltp * 0.97, 1.0)
+        resistance = max(ltp * 1.03, 1.0)
+        print(f"📊 [Technical Agent]: {stock_code} LTP={ltp:.2f} change%={change_pct:.2f} -> {signal}")
+        return {"signal": signal, "support": support, "resistance": resistance}
 
 
 class ResearchNewsAgent:
@@ -132,12 +287,13 @@ class ResearchNewsAgent:
             'regulatory': 1.3
         }
 
-    def analyze_event_feed(self, stock_code, feed_data):
-        print(f"🔍 [Research News Agent]: Sweeping news stream for {stock_code}...")
-        total_score = 0.0
+    def analyze_event_feed(self, stock_code, feed_data=None, quote_snapshot=None):
+        quote_snapshot = quote_snapshot or {}
+        feed_data = feed_data or build_event_stream(stock_code, quote_snapshot)
 
-        positive_terms = ['growth', 'profit', 'surge', 'recovery', 'expansion', 'dividend', 'deal', 'win']
-        negative_terms = ['decline', 'loss', 'fine', 'penalty', 'headwind', 'uncertainty', 'drop', 'cut']
+        total_score = 0.0
+        positive_terms = ['growth', 'profit', 'surge', 'recovery', 'expansion', 'dividend', 'deal', 'win', 'momentum', 'demand']
+        negative_terms = ['decline', 'loss', 'fine', 'penalty', 'headwind', 'uncertainty', 'drop', 'cut', 'pressure', 'weakness']
 
         for event in feed_data:
             headline = event.get('headline', '').lower()
@@ -164,9 +320,12 @@ class BacktestAgent:
     def __init__(self, breeze):
         self.breeze = breeze
 
-    def run_quick_backtest(self, stock_code):
-        print(f"🔄 [Backtest Agent]: Validating 30-day historical strategy win-rate for {stock_code}...")
-        return True
+    def run_quick_backtest(self, stock_code, quote_snapshot=None):
+        quote_snapshot = quote_snapshot or {}
+        change_pct = float(quote_snapshot.get('day_change_pct', 0.0) or 0.0)
+        volume = float(quote_snapshot.get('volume', 0.0) or 0.0)
+        print(f"🔄 [Backtest Agent]: Validating short-term momentum quality for {stock_code}...")
+        return change_pct >= 0.0 and volume > 0.0
 
 
 class RiskAnalysisAgent:
@@ -203,36 +362,72 @@ class MasterTradingPlatform:
     def __init__(self, breeze, cash_risk_mgr):
         self.breeze = breeze
         self.cash_mgr = cash_risk_mgr
-        self.researcher = ResearchAgent(['RELIND', 'TCS', 'ITC', 'INFY'])
+        self.researcher = ResearchAgent(DEFAULT_NSE_UNIVERSE)
         self.technician = TechnicalAgent(breeze)
         self.news_analyst = ResearchNewsAgent()
         self.backtester = BacktestAgent(breeze)
         self.risk_analyst = RiskAnalysisAgent(max_risk_pct=0.01)
         self.executor = ExecutionAgent(breeze, cash_risk_mgr, mode="PAPER")
+        self.selection_state = load_selection_state()
 
-    def run_daily_agent_cycle(self, mode="PAPER", max_allocation_pct=10.0):
+    def fetch_nse_universe_quotes(self):
+        quote_map = {}
+        for stock in DEFAULT_NSE_UNIVERSE:
+            try:
+                quote = self.breeze.get_quotes(stock_code=stock, exchange_code='NSE', product_type='cash')
+                snapshot = normalize_quote_snapshot(quote)
+                if snapshot and float(snapshot.get('ltp', 0.0) or 0.0) > 0:
+                    quote_map[stock] = snapshot
+            except Exception as exc:
+                print(f"⚠️ Quote fetch failed for {stock}: {exc}")
+                continue
+
+        if quote_map:
+            return quote_map
+
+        print("⚠️ Breeze quote stream unavailable, using synthetic live-style fallback values.")
+        for stock in DEFAULT_NSE_UNIVERSE[:25]:
+            base = 100.0 + (sum(ord(ch) for ch in stock) % 2200)
+            drift = ((sum(ord(ch) for ch in stock) % 13) - 6) * 0.35
+            volume = 250000 + (sum(ord(ch) for ch in stock) % 750000)
+            quote_map[stock] = {
+                "ltp": round(base, 2),
+                "day_change": round(drift, 2),
+                "day_change_pct": round(drift / base * 100.0, 2),
+                "volume": float(volume),
+                "day_high": round(base * 1.02, 2),
+                "day_low": round(base * 0.98, 2),
+                "close": round(base, 2)
+            }
+        return quote_map
+
+    def run_daily_agent_cycle(self, mode="PAPER", max_allocation_pct=10.0, cooldown_hours=72):
         self.executor.mode = mode
         print(f"\n{'='*60}\n🤖 STARTING MULTI-AGENT TRADING CYCLE ({mode} MODE)\n{'='*60}")
 
-        candidates = self.researcher.recommend_candidates()
+        live_quotes = self.fetch_nse_universe_quotes()
+        active_positions = set(self.cash_mgr.positions.keys())
+        candidates = self.researcher.recommend_candidates(live_quotes, active_positions, self.selection_state, cooldown_hours)
+        selected = []
+
         for stock in candidates[:2]:
             print(f"\n--- Processing Ticker: {stock} ---")
+            quote = live_quotes.get(stock, {})
+            tech_sig = self.technician.analyze(stock, quote)
 
-            tech_sig = self.technician.analyze(stock)
-            
-            mock_feed = [
-                {'headline': f'{stock} expands operational capacity with major commercial wins', 'category': 'product_launch'},
-                {'headline': f'Analysts forecast strong margin recovery for {stock} in Q2', 'category': 'earnings'}
-            ]
-            news_analysis = self.news_analyst.analyze_event_feed(stock, mock_feed)
+            feed_data = build_event_stream(stock, quote)
+            news_analysis = self.news_analyst.analyze_event_feed(stock, feed_data, quote)
 
             if tech_sig['signal'] == "BULLISH" and "BULLISH" in news_analysis['recommendation']:
-                if self.backtester.run_quick_backtest(stock):
+                if self.backtester.run_quick_backtest(stock, quote):
                     try:
-                        quote = self.breeze.get_quotes(stock_code=stock, exchange_code='NSE', product_type='cash')
-                        price = float(quote['Success'][0]['ltp'])
+                        price = float(quote.get('ltp', 0.0) or 0.0)
                     except Exception:
                         price = 1200.0
+
+                    if price <= 0:
+                        print(f"⚠️ Invalid price for {stock}, skipping trade.")
+                        continue
 
                     current_capital = self.cash_mgr.capital if mode == "PAPER" else 100000.0
                     allocation_amt = current_capital * (max_allocation_pct / 100.0)
@@ -241,11 +436,19 @@ class MasterTradingPlatform:
                     if qty > 0:
                         approved, reason = self.risk_analyst.validate_trade(stock, price, qty, current_capital)
                         if approved:
-                            self.executor.route_order(stock, qty, price, "BUY")
+                            if stock not in self.cash_mgr.positions and not is_cooldown(stock, self.selection_state, cooldown_hours):
+                                self.executor.route_order(stock, qty, price, "BUY")
+                                selected.append(stock)
+                                mark_stock_selected(stock, self.selection_state)
+                                save_selection_state(self.selection_state)
+                            else:
+                                print(f"🚫 {stock} is already in the portfolio or is still under cooldown. Skipping buy.")
                         else:
                             print(f"❌ Trade Rejected by Risk Agent: {reason}")
                     else:
                         print("⚠️ Allocation amount insufficient for single unit purchase.")
+
+        return selected
 
 
 # =====================================================================
@@ -256,12 +459,10 @@ def main():
     print("INITIALIZING ICICI BREEZE ALGORITHMIC TRADING SYSTEM")
     print("=" * 60)
 
-    # Environment variables or fallback prompt for credentials
     api_key = os.environ.get("ICICI_API_KEY") or "0EL45N5TZ688+84_945=00F290#tCe9j"
     api_secret = os.environ.get("ICICI_API_SECRET") or "4158^87H208z95xVA73959766$0(GO59"
     session_token = os.environ.get("ICICI_SESSION_TOKEN")
 
-    # Interactive prompt if token is not passed via environment variable
     if not session_token:
         encoded_key = urllib.parse.quote_plus(api_key)
         login_url = f"https://api.icicidirect.com/apiuser/login?api_key={encoded_key}"
@@ -269,7 +470,6 @@ def main():
         print(login_url)
         session_token = input("\nSTEP 2: Enter the 'apisession' token from the redirected URL: ").strip()
 
-    # Authenticate Breeze Session
     breeze = BreezeConnect(api_key=api_key)
     try:
         breeze.generate_session(api_secret=api_secret, session_token=session_token)
@@ -278,14 +478,11 @@ def main():
         print(f"\n❌ Authentication Failed: {e}")
         sys.exit(1)
 
-    # Initialize Risk Manager and Multi-Agent Core
     risk_manager = PaperTradingRiskManager(initial_capital=100000.0, max_daily_loss=1500.0)
     platform = MasterTradingPlatform(breeze, risk_manager)
 
-    # Execute Initial Agent Cycle
-    platform.run_daily_agent_cycle(mode="PAPER", max_allocation_pct=10.0)
+    selected = platform.run_daily_agent_cycle(mode="PAPER", max_allocation_pct=10.0, cooldown_hours=72)
 
-    # Portfolio Summary
     print("\n" + "=" * 60)
     print("ACTIVE PAPER TRADING PORTFOLIO SNAPSHOT")
     print("=" * 60)
@@ -294,6 +491,11 @@ def main():
             print(f"Stock: {stock:10s} | Qty: {pos['qty']:<4d} | Entry: ₹{pos['entry_price']:.2f} | SL: ₹{pos['sl']:.2f} | TP: ₹{pos['tp']:.2f}")
     else:
         print("No open positions in portfolio.")
+
+    if selected:
+        print(f"\n✅ Selected today: {', '.join(selected)}")
+    else:
+        print("\nNo qualifying stocks met the research and cooldown rules today.")
 
 
 if __name__ == "__main__":
