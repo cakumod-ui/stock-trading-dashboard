@@ -1,5 +1,7 @@
+import csv
 import os
 from datetime import time as dtime
+from typing import List, Set
 
 DEFAULT_NSE_UNIVERSE = [
     "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN", "ITC",
@@ -12,23 +14,23 @@ DEFAULT_NSE_UNIVERSE = [
     "BAJAJ-AUTO", "HINDALCO", "ICICIPRULI", "UPL", "TATACONSUM",
     "COALINDIA", "BEL", "GAIL", "VEDL", "BPCL", "CANBK", "IDFCFIRSTB",
     "SIEMENS", "ADANIGREEN", "ADANIPORTS", "INDIGO", "ZOMATO", "TRENT",
-    "PAYTM", "SBI", "PNB", "YESBANK", "BANKBARODA", "AUBANK",
+    "PAYTM", "SBI", "PNB", "YESBANK", "BANKBARODA", "AUBANK"
 ]
 
 DEFAULT_FUTURE_UNIVERSE = [
     "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN",
     "ITC", "TATAMOTORS", "LTIM", "AXISBANK", "KOTAKBANK",
-    "BAJFINANCE", "SUNPHARMA", "ASIANPAINT", "TATASTEEL", "MARUTI",
+    "BAJFINANCE", "SUNPHARMA", "ASIANPAINT", "TATASTEEL", "MARUTI"
 ]
 
 NEWS_KEYWORDS = {
     "positive": [
         "growth", "profit", "surge", "recovery", "expansion", "dividend",
-        "deal", "win", "momentum", "demand", "upgrade", "outperformance",
+        "deal", "win", "momentum", "demand", "upgrade", "outperformance"
     ],
     "negative": [
         "decline", "loss", "fine", "penalty", "headwind", "uncertainty",
-        "drop", "cut", "pressure", "weakness", "downgrade", "risk",
+        "drop", "cut", "pressure", "weakness", "downgrade", "risk"
     ],
 }
 
@@ -45,5 +47,32 @@ MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "3"))
 INTRADAY_PICK_COUNT = int(os.getenv("INTRADAY_PICK_COUNT", "2"))
 FUTURE_PICK_COUNT = int(os.getenv("FUTURE_PICK_COUNT", "1"))
 
-TRADE_MODE_PAPER = "PAPER"
-TRADE_MODE_LIVE = "LIVE"
+CASH_UNIVERSE_PATH = os.getenv("CASH_UNIVERSE_PATH", "data/cash_universe.csv")
+FO_UNIVERSE_PATH = os.getenv("FO_UNIVERSE_PATH", "data/fo_universe.csv")
+
+def load_csv_symbols(path: str) -> List[str]:
+    if not path or not os.path.exists(path):
+        return []
+    symbols: Set[str] = set()
+    try:
+        with open(path, "r", encoding="utf-8", newline="") as csv_file:
+            reader = csv.DictReader(csv_file)
+            for row in reader:
+                symbol = (row.get("symbol") or "").strip().upper()
+                if symbol:
+                    symbols.add(symbol)
+    except Exception:
+        return []
+    return sorted(symbols)
+
+def get_cash_universe() -> List[str]:
+    symbols = load_csv_symbols(CASH_UNIVERSE_PATH)
+    if symbols:
+        return symbols
+    return list(DEFAULT_NSE_UNIVERSE)
+
+def get_fo_universe() -> List[str]:
+    symbols = load_csv_symbols(FO_UNIVERSE_PATH)
+    if symbols:
+        return symbols
+    return list(DEFAULT_FUTURE_UNIVERSE)
