@@ -2,10 +2,65 @@ import os
 import sys
 import time
 import math
+import random
 import urllib.parse
 from datetime import datetime, timedelta
 import pandas as pd
 from breeze_connect import BreezeConnect
+
+try:
+    from nsetools import Nse
+except ImportError:  # pragma: no cover
+    Nse = None
+
+
+def get_all_nse_stocks(max_symbols=None):
+    """Return a broad NSE universe. Uses the official nsetools feed when available,
+    with a robust fallback list so the bot still runs without internet access.
+    """
+    fallback_symbols = [
+        "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN", "ITC",
+        "LTIM", "AXISBANK", "KOTAKBANK", "SUNPHARMA", "WIPRO", "BAJFINANCE",
+        "HINDUNILVR", "TATAMOTORS", "BHARTIARTL", "ASIANPAINT", "NTPC", "POWERGRID",
+        "MARUTI", "ULTRACEMCO", "JSWSTEEL", "TATASTEEL", "INDUSINDBK", "HCLTECH",
+        "TECHM", "ONGC", "CIPLA", "APOLLOHOSP", "DRREDDY", "GRASIM", "NESTLEIND",
+        "DIVISLAB", "EICHERMOT", "TITAN", "SHRIRAMFIN", "M&M", "LT", "TATACONSUM",
+        "BRITANNIA", "COALINDIA", "HINDALCO", "BAJAJ AUTO", "ADANIGREEN", "INFY"
+    ]
+
+    if Nse is None:
+        symbols = fallback_symbols
+        if max_symbols:
+            return random.sample(symbols, k=min(len(symbols), max_symbols))
+        return symbols
+
+    try:
+        nse = Nse()
+        stock_codes = nse.get_stock_codes()
+        if not stock_codes:
+            raise ValueError("No NSE stock codes returned")
+
+        symbols = []
+        for code in stock_codes.keys():
+            if isinstance(code, str):
+                cleaned = code.strip().upper()
+                if cleaned:
+                    symbols.append(cleaned)
+
+        if not symbols:
+            raise ValueError("NSE stock list empty after cleaning")
+
+        random.shuffle(symbols)
+        if max_symbols:
+            return symbols[:max_symbols]
+        return symbols
+    except Exception as exc:
+        print(f"⚠️ Could not fetch live NSE universe ({exc}). Falling back to default stock list.")
+        symbols = fallback_symbols
+        random.shuffle(symbols)
+        if max_symbols:
+            return symbols[:max_symbols]
+        return symbols
 
 
 # =====================================================================
@@ -16,7 +71,7 @@ class PaperTradingRiskManager:
     Tracks paper trading portfolio state, order history, and enforces
     risk parameters (Max Daily Loss, Stop-Loss, Take-Profit).
     """
-    def __init__(self, initial_capital=100000.0, max_daily_loss=2000.0, 
+    def __init__(self, initial_capital=100000.0, max_daily_loss=2000.0,
                  default_stop_loss_pct=0.01, default_take_profit_pct=0.02):
         self.capital = initial_capital
         self.portfolio_value = initial_capital
@@ -109,7 +164,7 @@ class ResearchAgent:
         self.candidate_pool = candidate_pool
 
     def recommend_candidates(self):
-        print("🔍 [Research Agent]: Scanning candidate pool for liquid equity instruments...")
+        print(f"🔍 [Research Agent]: Scanning {len(self.candidate_pool)} NSE-listed instruments...")
         return self.candidate_pool
 
 
@@ -203,7 +258,8 @@ class MasterTradingPlatform:
     def __init__(self, breeze, cash_risk_mgr):
         self.breeze = breeze
         self.cash_mgr = cash_risk_mgr
-        self.researcher = ResearchAgent(['RELIND', 'TCS', 'ITC', 'INFY'])
+        # Use the full NSE universe instead of a hard-coded 4-stock shortlist.
+        self.researcher = ResearchAgent(get_all_nse_stocks(max_symbols=200))
         self.technician = TechnicalAgent(breeze)
         self.news_analyst = ResearchNewsAgent()
         self.backtester = BacktestAgent(breeze)
@@ -215,11 +271,11 @@ class MasterTradingPlatform:
         print(f"\n{'='*60}\n🤖 STARTING MULTI-AGENT TRADING CYCLE ({mode} MODE)\n{'='*60}")
 
         candidates = self.researcher.recommend_candidates()
-        for stock in candidates[:2]:
+        for stock in candidates:
             print(f"\n--- Processing Ticker: {stock} ---")
 
             tech_sig = self.technician.analyze(stock)
-            
+
             mock_feed = [
                 {'headline': f'{stock} expands operational capacity with major commercial wins', 'category': 'product_launch'},
                 {'headline': f'Analysts forecast strong margin recovery for {stock} in Q2', 'category': 'earnings'}
