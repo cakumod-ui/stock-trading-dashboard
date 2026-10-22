@@ -1,7 +1,7 @@
 import json
+import math
 import os
 import sys
-import time
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -27,16 +27,33 @@ DEFAULT_NSE_UNIVERSE = [
 ]
 
 
+DEFAULT_STATE = {
+    "last_selected": {},
+    "trade_history": [],
+}
+
+
+def _safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 def load_selection_state():
     if not STATE_PATH.exists():
-        return {"last_selected": {}}
+        return DEFAULT_STATE.copy()
 
     try:
         with STATE_PATH.open("r", encoding="utf-8") as handle:
             state = json.load(handle)
-        return {"last_selected": state.get("last_selected", {})}
     except Exception:
-        return {"last_selected": {}}
+        return DEFAULT_STATE.copy()
+
+    result = DEFAULT_STATE.copy()
+    result["last_selected"] = state.get("last_selected", {})
+    result["trade_history"] = state.get("trade_history", [])
+    return result
 
 
 def save_selection_state(state):
@@ -62,6 +79,19 @@ def is_cooldown(stock_code, state, cooldown_hours=72):
 def mark_stock_selected(stock_code, state):
     state.setdefault("last_selected", {})
     state["last_selected"][stock_code] = datetime.now(timezone.utc).isoformat()
+
+
+def append_trade_event(state, stock_code, action, qty, price):
+    state.setdefault("trade_history", [])
+    entry = {
+        "stock_code": stock_code,
+        "action": action,
+        "qty": int(qty),
+        "price": float(price),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    state["trade_history"].append(entry)
+    state["trade_history"] = state["trade_history"][-300:]
 
 
 def normalize_quote_snapshot(raw_quote):
@@ -99,6 +129,7 @@ def normalize_quote_snapshot(raw_quote):
         except Exception:
             change_pct = 0.0
 
+    previous_close = item.get("prev_close") or item.get("close") or price
     return {
         "ltp": float(price),
         "day_change": float(change or 0.0),
@@ -106,21 +137,82 @@ def normalize_quote_snapshot(raw_quote):
         "volume": float(volume or 0.0),
         "day_high": float(item.get("day_high") or 0.0),
         "day_low": float(item.get("day_low") or 0.0),
-        "close": float(item.get("prev_close") or item.get("close") or price),
+        "close": float(previous_close),
+        "previous_close": float(previous_close),
     }
 
 
 def build_event_stream(stock_code, quote_snapshot):
-    change_pct = float(quote_snapshot.get("day_change_pct", 0.0) or 0.0)
+    change_pct = _safe_float(quote_snapshot.get("day_change_pct"), 0.0)
     if change_pct >= 0:
         return [
-            {"headline": f"{stock_code} extends gains on broad market participation and strong demand", "category": "earnings"},
+            {"headline": f"{stock_code} extends gains on strong demand and broad participation", "category": "earnings"},
             {"headline": f"{stock_code} shows positive momentum with buyers absorbing supply across the session", "category": "product_launch"},
         ]
     return [
-        {"headline": f"{stock_code} faces profit booking pressure and weak momentum in the current session", "category": "regulatory"},
-        {"headline": f"{stock_code} remains under pressure amid elevated volatility and weak sentiment", "category": "macroeconomic"},
+        {"headline": f"{stock_code} faces profit booking pressure and weak sentiment in the session", "category": "regulatory"},
+        {"headline": f"{stock_code} remains under pressure amid elevated volatility and weak trading breadth", "category": "macroeconomic"},
     ]
+
+
+def simulate_recent_series(close_price, extra_strength=0.0, points=20):
+    base = float(close_price or 100.0)
+    series = []
+    for idx in range(points):
+        phase = idx / max(points - 1, 1)
+        wave = math.sin((idx + 1) * 0.8) * (0.012 + abs(extra_strength) * 0.004)
+        drift = (0.5 - phase) * 0.015 + extra_strength * 0.002
+        value = base * (1 + wave + drift)
+        series.append(value)
+    return series
+
+
+def calculate_sma(values):
+    if not values:
+        return 0.0
+    return sum(values) / len(values)
+
+
+def calculate_ema(values, period=9):
+    if not values:
+        return 0.0
+    multiplier = 2.0 / (period + 1.0)
+    ema = values[0]
+    for value in values[1:]:
+        ema = (value - ema) * multiplier + ema
+    return ema
+
+
+def compute_indicator_snapshot(quote_snapshot):
+    close_price = _safe_float(quote_snapshot.get("close"), quote_snapshot.get("ltp", 100.0))
+    ltp = _safe_float(quote_snapshot.get("ltp"), close_price)
+    change_pct = _safe_float(quote_snapshot.get("day_change_pct"), 0.0)
+    volume = _safe_float(quote_snapshot.get("volume"), 0.0)
+    recent_series = simulate_recent_series(close_price, change_pct / 100.0, points=20)
+    sma_20 = calculate_sma(recent_series)
+    ema_9 = calculate_ema(recent_series, 9)
+    ema_21 = calculate_ema(recent_series, 21)
+    avg_volume = max(volume * 0.7, 50000.0)
+    breakout = 1 if (ltp > close_price and volume > avg_volume * 1.2) else 0
+    trend_strength = 0
+    if ltp > sma_20:
+        trend_strength += 1
+    if ema_9 > ema_21:
+        trend_strength += 1
+    if change_pct > 0:
+        trend_strength += 1
+    volatility = max(0.0, (max(recent_series) - min(recent_series)) / max(close_price, 1.0))
+    risk_penalty = 1.0 + (volatility * 80.0) + max(0.0, abs(change_pct) * 0.35)
+    return {
+        "sma_20": sma_20,
+        "ema_9": ema_9,
+        "ema_21": ema_21,
+        "trend_strength": trend_strength,
+        "breakout": breakout,
+        "volatility": volatility,
+        "risk_penalty": risk_penalty,
+        "avg_volume": avg_volume,
+    }
 
 
 # =====================================================================
@@ -224,7 +316,7 @@ class ResearchAgent:
     def recommend_candidates(self, quote_map, active_positions=None, state=None, cooldown_hours=72):
         print("🔍 [Research Agent]: Scanning NSE universe for the best momentum names...")
         active_positions = active_positions or set()
-        candidates = []
+        ranked_candidates = []
 
         for stock in self.candidate_pool:
             if stock in active_positions:
@@ -236,23 +328,27 @@ class ResearchAgent:
             if not quote:
                 continue
 
-            ltp = float(quote.get('ltp', 0.0) or 0.0)
-            change_pct = float(quote.get('day_change_pct', 0.0) or 0.0)
-            volume = float(quote.get('volume', 0.0) or 0.0)
-            score = (change_pct * 4.0) + min(volume / 1000000.0, 10.0)
+            ltp = _safe_float(quote.get('ltp'), 0.0)
+            change_pct = _safe_float(quote.get('day_change_pct'), 0.0)
+            volume = _safe_float(quote.get('volume'), 0.0)
+            volume_factor = min(volume / 1_000_000.0, 10.0)
+            score = (change_pct * 4.0) + volume_factor
             if ltp > 0:
                 score += 1.0
             if change_pct > 0:
                 score += 2.0
+            ranked_candidates.append({
+                "stock_code": stock,
+                "score": score,
+                "quote": quote,
+            })
 
-            candidates.append((stock, score, quote))
-
-        if not candidates:
+        if not ranked_candidates:
             print("⚠️ No valid candidates after filtering inactive or cooled-down stocks.")
             return []
 
-        candidates.sort(key=lambda item: item[1], reverse=True)
-        top = [stock for stock, _, _ in candidates[:10]]
+        ranked_candidates.sort(key=lambda item: item["score"], reverse=True)
+        top = [entry["stock_code"] for entry in ranked_candidates[:12]]
         print(f"✅ Ranked candidate list: {top}")
         return top
 
@@ -263,18 +359,34 @@ class TechnicalAgent:
 
     def analyze(self, stock_code, quote_snapshot=None):
         quote_snapshot = quote_snapshot or {}
-        ltp = float(quote_snapshot.get('ltp', 0.0) or 0.0)
-        change_pct = float(quote_snapshot.get('day_change_pct', 0.0) or 0.0)
+        ltp = _safe_float(quote_snapshot.get('ltp'), 0.0)
+        change_pct = _safe_float(quote_snapshot.get('day_change_pct'), 0.0)
+        close_price = _safe_float(quote_snapshot.get('close'), ltp)
+        indicators = compute_indicator_snapshot(quote_snapshot)
 
+        trend_score = 0
+        if ltp > indicators["sma_20"]:
+            trend_score += 1
+        if indicators["ema_9"] > indicators["ema_21"]:
+            trend_score += 1
         if change_pct >= 0:
-            signal = "BULLISH"
-        else:
-            signal = "BEARISH"
+            trend_score += 1
 
+        signal = "BULLISH" if trend_score >= 2 and (change_pct >= 0 or indicators["breakout"] == 1) else "BEARISH"
         support = max(ltp * 0.97, 1.0)
         resistance = max(ltp * 1.03, 1.0)
-        print(f"📊 [Technical Agent]: {stock_code} LTP={ltp:.2f} change%={change_pct:.2f} -> {signal}")
-        return {"signal": signal, "support": support, "resistance": resistance}
+        print(f"📊 [Technical Agent]: {stock_code} LTP={ltp:.2f} change%={change_pct:.2f} SMA20={indicators['sma_20']:.2f} EMA9={indicators['ema_9']:.2f} -> {signal}")
+        return {
+            "signal": signal,
+            "support": support,
+            "resistance": resistance,
+            "trend_strength": trend_score,
+            "sma_20": indicators["sma_20"],
+            "ema_9": indicators["ema_9"],
+            "ema_21": indicators["ema_21"],
+            "breakout": indicators["breakout"],
+            "risk_penalty": indicators["risk_penalty"],
+        }
 
 
 class ResearchNewsAgent:
@@ -288,9 +400,7 @@ class ResearchNewsAgent:
         }
 
     def analyze_event_feed(self, stock_code, feed_data=None, quote_snapshot=None):
-        quote_snapshot = quote_snapshot or {}
-        feed_data = feed_data or build_event_stream(stock_code, quote_snapshot)
-
+        feed_data = feed_data or build_event_stream(stock_code, quote_snapshot or {})
         total_score = 0.0
         positive_terms = ['growth', 'profit', 'surge', 'recovery', 'expansion', 'dividend', 'deal', 'win', 'momentum', 'demand']
         negative_terms = ['decline', 'loss', 'fine', 'penalty', 'headwind', 'uncertainty', 'drop', 'cut', 'pressure', 'weakness']
@@ -322,10 +432,11 @@ class BacktestAgent:
 
     def run_quick_backtest(self, stock_code, quote_snapshot=None):
         quote_snapshot = quote_snapshot or {}
-        change_pct = float(quote_snapshot.get('day_change_pct', 0.0) or 0.0)
-        volume = float(quote_snapshot.get('volume', 0.0) or 0.0)
+        change_pct = _safe_float(quote_snapshot.get('day_change_pct'), 0.0)
+        volume = _safe_float(quote_snapshot.get('volume'), 0.0)
+        indicators = compute_indicator_snapshot(quote_snapshot)
         print(f"🔄 [Backtest Agent]: Validating short-term momentum quality for {stock_code}...")
-        return change_pct >= 0.0 and volume > 0.0
+        return change_pct >= 0.0 and volume > 0.0 and indicators['breakout'] == 1 and indicators['ema_9'] > indicators['ema_21']
 
 
 class RiskAnalysisAgent:
@@ -359,9 +470,10 @@ class ExecutionAgent:
 # 3. MASTER PLATFORM CONTROLLER
 # =====================================================================
 class MasterTradingPlatform:
-    def __init__(self, breeze, cash_risk_mgr):
+    def __init__(self, breeze, cash_risk_mgr, state_path=STATE_PATH):
         self.breeze = breeze
         self.cash_mgr = cash_risk_mgr
+        self.state_path = state_path
         self.researcher = ResearchAgent(DEFAULT_NSE_UNIVERSE)
         self.technician = TechnicalAgent(breeze)
         self.news_analyst = ResearchNewsAgent()
@@ -376,7 +488,7 @@ class MasterTradingPlatform:
             try:
                 quote = self.breeze.get_quotes(stock_code=stock, exchange_code='NSE', product_type='cash')
                 snapshot = normalize_quote_snapshot(quote)
-                if snapshot and float(snapshot.get('ltp', 0.0) or 0.0) > 0:
+                if snapshot and _safe_float(snapshot.get('ltp'), 0.0) > 0:
                     quote_map[stock] = snapshot
             except Exception as exc:
                 print(f"⚠️ Quote fetch failed for {stock}: {exc}")
@@ -386,20 +498,54 @@ class MasterTradingPlatform:
             return quote_map
 
         print("⚠️ Breeze quote stream unavailable, using synthetic live-style fallback values.")
-        for stock in DEFAULT_NSE_UNIVERSE[:25]:
-            base = 100.0 + (sum(ord(ch) for ch in stock) % 2200)
-            drift = ((sum(ord(ch) for ch in stock) % 13) - 6) * 0.35
-            volume = 250000 + (sum(ord(ch) for ch in stock) % 750000)
+        for stock in DEFAULT_NSE_UNIVERSE[:60]:
+            base = 120.0 + (sum(ord(ch) for ch in stock) % 3200)
+            drift = ((sum(ord(ch) for ch in stock) % 17) - 8) * 0.55
+            volume = 150000 + (sum(ord(ch) for ch in stock) % 850000)
             quote_map[stock] = {
                 "ltp": round(base, 2),
                 "day_change": round(drift, 2),
-                "day_change_pct": round(drift / base * 100.0, 2),
+                "day_change_pct": round((drift / base) * 100.0, 2),
                 "volume": float(volume),
                 "day_high": round(base * 1.02, 2),
                 "day_low": round(base * 0.98, 2),
-                "close": round(base, 2)
+                "close": round(base, 2),
+                "previous_close": round(base, 2),
             }
         return quote_map
+
+    def score_candidate(self, stock, quote, tech_sig, news_analysis):
+        change_pct = _safe_float(quote.get('day_change_pct'), 0.0)
+        volume = _safe_float(quote.get('volume'), 0.0)
+        ltp = _safe_float(quote.get('ltp'), 0.0)
+        previous_close = _safe_float(quote.get('previous_close') or quote.get('close'), ltp)
+        price_trend = (ltp - previous_close) / max(previous_close, 1.0) * 100.0
+        trend_bonus = 0.0
+        if tech_sig.get('signal') == 'BULLISH':
+            trend_bonus += 20.0
+        if tech_sig.get('breakout') == 1:
+            trend_bonus += 25.0
+        if tech_sig.get('ema_9', 0.0) > tech_sig.get('ema_21', 0.0):
+            trend_bonus += 15.0
+        if tech_sig.get('sma_20', 0.0) and ltp > tech_sig.get('sma_20', 0.0):
+            trend_bonus += 10.0
+
+        news_bonus = 0.0
+        rec = news_analysis.get('recommendation', '').upper()
+        if 'BULLISH' in rec:
+            news_bonus = 12.0
+        elif 'BEARISH' in rec:
+            news_bonus = -12.0
+        else:
+            news_bonus = 0.0
+
+        volume_bonus = min(volume / 500_000.0, 15.0) * 2.0
+        price_bonus = max(change_pct * 5.0, 0.0)
+        risk_penalty = tech_sig.get('risk_penalty', 1.0) * 10.0
+        final_score = trend_bonus + news_bonus + volume_bonus + price_bonus - risk_penalty
+        if price_trend < 0:
+            final_score -= 10.0
+        return final_score
 
     def run_daily_agent_cycle(self, mode="PAPER", max_allocation_pct=10.0, cooldown_hours=72):
         self.executor.mode = mode
@@ -407,46 +553,69 @@ class MasterTradingPlatform:
 
         live_quotes = self.fetch_nse_universe_quotes()
         active_positions = set(self.cash_mgr.positions.keys())
-        candidates = self.researcher.recommend_candidates(live_quotes, active_positions, self.selection_state, cooldown_hours)
-        selected = []
+        candidate_list = self.researcher.recommend_candidates(live_quotes, active_positions, self.selection_state, cooldown_hours)
 
-        for stock in candidates[:2]:
-            print(f"\n--- Processing Ticker: {stock} ---")
+        ranked_candidates = []
+        for stock in candidate_list:
             quote = live_quotes.get(stock, {})
             tech_sig = self.technician.analyze(stock, quote)
-
             feed_data = build_event_stream(stock, quote)
             news_analysis = self.news_analyst.analyze_event_feed(stock, feed_data, quote)
 
-            if tech_sig['signal'] == "BULLISH" and "BULLISH" in news_analysis['recommendation']:
-                if self.backtester.run_quick_backtest(stock, quote):
-                    try:
-                        price = float(quote.get('ltp', 0.0) or 0.0)
-                    except Exception:
-                        price = 1200.0
+            if not (tech_sig['signal'] == 'BULLISH' or tech_sig.get('breakout') == 1):
+                continue
 
-                    if price <= 0:
-                        print(f"⚠️ Invalid price for {stock}, skipping trade.")
-                        continue
+            if 'BULLISH' not in news_analysis['recommendation'] and 'HOLD' not in news_analysis['recommendation']:
+                continue
 
-                    current_capital = self.cash_mgr.capital if mode == "PAPER" else 100000.0
-                    allocation_amt = current_capital * (max_allocation_pct / 100.0)
-                    qty = int(allocation_amt / price)
+            if not self.backtester.run_quick_backtest(stock, quote):
+                continue
 
-                    if qty > 0:
-                        approved, reason = self.risk_analyst.validate_trade(stock, price, qty, current_capital)
-                        if approved:
-                            if stock not in self.cash_mgr.positions and not is_cooldown(stock, self.selection_state, cooldown_hours):
-                                self.executor.route_order(stock, qty, price, "BUY")
-                                selected.append(stock)
-                                mark_stock_selected(stock, self.selection_state)
-                                save_selection_state(self.selection_state)
-                            else:
-                                print(f"🚫 {stock} is already in the portfolio or is still under cooldown. Skipping buy.")
-                        else:
-                            print(f"❌ Trade Rejected by Risk Agent: {reason}")
-                    else:
-                        print("⚠️ Allocation amount insufficient for single unit purchase.")
+            final_score = self.score_candidate(stock, quote, tech_sig, news_analysis)
+            ranked_candidates.append({
+                "stock": stock,
+                "score": final_score,
+                "quote": quote,
+                "tech_sig": tech_sig,
+                "news_analysis": news_analysis,
+            })
+
+        if not ranked_candidates:
+            print("⚠️ No qualified candidates passed technical, news, and breakout filters.")
+            return []
+
+        ranked_candidates.sort(key=lambda item: item["score"], reverse=True)
+        chosen = ranked_candidates[:2]
+        selected = []
+
+        for candidate in chosen:
+            stock = candidate["stock"]
+            quote = candidate["quote"]
+            price = _safe_float(quote.get('ltp'), 0.0)
+            if price <= 0:
+                continue
+
+            current_capital = self.cash_mgr.capital if mode == "PAPER" else 100000.0
+            allocation_amt = current_capital * (max_allocation_pct / 100.0)
+            qty = max(1, int(allocation_amt / price))
+
+            approved, reason = self.risk_analyst.validate_trade(stock, price, qty, current_capital)
+            if not approved:
+                print(f"❌ Trade Rejected by Risk Agent: {reason}")
+                continue
+
+            if stock in self.cash_mgr.positions:
+                print(f"🚫 {stock} already in portfolio. Skipping buy.")
+                continue
+            if is_cooldown(stock, self.selection_state, cooldown_hours):
+                print(f"🚫 {stock} is still inside cooldown. Skipping buy.")
+                continue
+
+            self.executor.route_order(stock, qty, price, "BUY")
+            mark_stock_selected(stock, self.selection_state)
+            append_trade_event(self.selection_state, stock, "BUY", qty, price)
+            save_selection_state(self.selection_state)
+            selected.append(stock)
 
         return selected
 
