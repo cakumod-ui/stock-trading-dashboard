@@ -1,7 +1,0 @@
-breeze-connect
-pandas
-requests
-matplotlib
-streamlit
-plotly
-pyotp
