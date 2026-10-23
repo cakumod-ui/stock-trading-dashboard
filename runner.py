@@ -3,13 +3,13 @@ import os
 import time
 from datetime import datetime
 
-from .auth import BreezeSessionManager
-from .config import DEFAULT_FUTURE_UNIVERSE, DEFAULT_NSE_UNIVERSE, DECISION_TIME_IST, MARKET_OPEN_IST
-from .config import get_cash_universe, get_fo_universe
-from .decision import DecisionAgent
-from .execution import ExecutionAgent, RiskManager, TradePlan
-from .market_scan import scan_market
-from .research import ResearchAgent
+from auth import BreezeSessionManager
+from config import DEFAULT_FUTURE_UNIVERSE, DEFAULT_NSE_UNIVERSE, DECISION_TIME_IST, MARKET_OPEN_IST
+from config import get_cash_universe, get_fo_universe
+from decision import DecisionAgent
+from execution import ExecutionAgent, RiskManager, TradePlan
+from market_scan import scan_market
+from research import ResearchAgent
 
 
 def wait_until_time(target_hour: int, target_minute: int, sleep_seconds: int = 5):
