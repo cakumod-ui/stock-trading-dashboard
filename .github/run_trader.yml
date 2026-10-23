@@ -37,7 +37,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyotp
-
+      
       - name: Execute trading agents
         env:
           ICICI_API_KEY: ${{ secrets.ICICI_API_KEY }}
@@ -54,4 +54,4 @@ jobs:
           MAX_RISK_PER_TRADE_PCT: ${{ secrets.MAX_RISK_PER_TRADE_PCT || '0.10' }}
           MAX_OPEN_POSITIONS: ${{ secrets.MAX_OPEN_POSITIONS || '3' }}
         run: |
-          python -m tradingagents.runner --mode "$TRADING_MODE"
+          python runner.py --mode "$TRADING_MODE"
