@@ -5,4 +5,3 @@ matplotlib
 streamlit
 plotly
 pyotp
-tradingagents
